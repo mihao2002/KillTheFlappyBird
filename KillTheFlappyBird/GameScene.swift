@@ -1,88 +1,159 @@
-//
-//  GameScene.swift
-//  KillTheFlappyBird
-//
-//  Created by Hao Mi on 8/30/25.
-//
-
 import SpriteKit
 import GameplayKit
 
-class GameScene: SKScene {
+class GameScene: SKScene, SKPhysicsContactDelegate {
     
-    private var label : SKLabelNode?
-    private var spinnyNode : SKShapeNode?
+    // Nodes
+    var bird: SKSpriteNode!
+    var candidatePipe: SKNode!
+    var pipeParent = SKNode()
+    
+    // Settings
+    let birdSpeed: CGFloat = 120.0
+    let pipeSpeed: CGFloat = -120.0
+    let spawnCooldown: TimeInterval = 1.5
+    let survivalTime: TimeInterval = 20.0  // if bird survives this long, player loses
+    
+    // State
+    var lastSpawnTime: TimeInterval = 0
+    var startTime: TimeInterval = 0
+    var gameOver = false
+    
+    // Physics categories
+    let birdCategory: UInt32 = 0x1 << 0
+    let pipeCategory: UInt32 = 0x1 << 1
     
     override func didMove(to view: SKView) {
+        backgroundColor = .cyan
+        physicsWorld.contactDelegate = self
         
-        // Get label node from scene and store it for use later
-        self.label = self.childNode(withName: "//helloLabel") as? SKLabelNode
-        if let label = self.label {
-            label.alpha = 0.0
-            label.run(SKAction.fadeIn(withDuration: 2.0))
-        }
+        // Bird setup
+        bird = SKSpriteNode(color: .yellow, size: CGSize(width: 40, height: 30))
+        bird.position = CGPoint(x: frame.minX + 100, y: frame.midY)
+        bird.physicsBody = SKPhysicsBody(rectangleOf: bird.size)
+        bird.physicsBody?.affectedByGravity = false
+        bird.physicsBody?.isDynamic = true
+        bird.physicsBody?.categoryBitMask = birdCategory
+        bird.physicsBody?.contactTestBitMask = pipeCategory
+        addChild(bird)
         
-        // Create shape node to use during mouse interaction
-        let w = (self.size.width + self.size.height) * 0.05
-        self.spinnyNode = SKShapeNode.init(rectOf: CGSize.init(width: w, height: w), cornerRadius: w * 0.3)
+        // Candidate pipe setup
+        candidatePipe = createPipe(atX: frame.maxX - 80, y: frame.midY)
+        addChild(candidatePipe)
         
-        if let spinnyNode = self.spinnyNode {
-            spinnyNode.lineWidth = 2.5
+        // Add parent node for spawned pipes
+        addChild(pipeParent)
+        
+        startTime = CACurrentMediaTime()
+    }
+    
+    override func update(_ currentTime: TimeInterval) {
+        guard !gameOver else { return }
+        
+        // Bird basic forward movement
+        let dx = birdSpeed * CGFloat(1.0 / 60.0)
+        bird.position.x += dx
+        
+        // --- Bird AI ---
+        if let nearestPipe = nearestPipeAhead() {
+            let gapY = nearestPipe.position.y
+            let gapRange: CGFloat = 80  // half of gap height
+            let safeTop = gapY + gapRange
+            let safeBottom = gapY - gapRange
             
-            spinnyNode.run(SKAction.repeatForever(SKAction.rotate(byAngle: CGFloat(Double.pi), duration: 1)))
-            spinnyNode.run(SKAction.sequence([SKAction.wait(forDuration: 0.5),
-                                              SKAction.fadeOut(withDuration: 0.5),
-                                              SKAction.removeFromParent()]))
+            if bird.position.y > safeTop {
+                bird.position.y -= 2.5   // gently move down
+            } else if bird.position.y < safeBottom {
+                bird.position.y += 2.5   // gently move up
+            }
+        } else {
+            // If no pipe ahead, just bob around
+            bird.position.y = frame.midY + sin(CGFloat(currentTime * 2)) * 50
         }
-    }
-    
-    
-    func touchDown(atPoint pos : CGPoint) {
-        if let n = self.spinnyNode?.copy() as! SKShapeNode? {
-            n.position = pos
-            n.strokeColor = SKColor.green
-            self.addChild(n)
+        
+        // Candidate pipe up & down
+        let bobY = sin(CGFloat(currentTime)) * 200
+        candidatePipe.position.y = frame.midY + bobY
+        
+        // Move spawned pipes
+        for pipe in pipeParent.children {
+            pipe.position.x += pipeSpeed * CGFloat(1.0 / 60.0)
         }
-    }
-    
-    func touchMoved(toPoint pos : CGPoint) {
-        if let n = self.spinnyNode?.copy() as! SKShapeNode? {
-            n.position = pos
-            n.strokeColor = SKColor.blue
-            self.addChild(n)
-        }
-    }
-    
-    func touchUp(atPoint pos : CGPoint) {
-        if let n = self.spinnyNode?.copy() as! SKShapeNode? {
-            n.position = pos
-            n.strokeColor = SKColor.red
-            self.addChild(n)
+        
+        // Check survival time
+        if currentTime - startTime >= survivalTime {
+            endGame(playerWon: false)
         }
     }
     
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        if let label = self.label {
-            label.run(SKAction.init(named: "Pulse")!, withKey: "fadeInOut")
-        }
+        guard !gameOver else { return }
         
-        for t in touches { self.touchDown(atPoint: t.location(in: self)) }
+        let now = CACurrentMediaTime()
+        if now - lastSpawnTime >= spawnCooldown {
+            spawnPipe()
+            lastSpawnTime = now
+        }
     }
     
-    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        for t in touches { self.touchMoved(toPoint: t.location(in: self)) }
+    func createPipe(atX x: CGFloat, y: CGFloat) -> SKNode {
+        let gapHeight: CGFloat = 160
+        let pipeWidth: CGFloat = 60
+        let pipeColor = UIColor.green
+        
+        let node = SKNode()
+        node.position = CGPoint(x: x, y: y)
+        
+        let topPipe = SKSpriteNode(color: pipeColor, size: CGSize(width: pipeWidth, height: frame.height))
+        topPipe.anchorPoint = CGPoint(x: 0.5, y: 0)
+        topPipe.position = CGPoint(x: 0, y: gapHeight/2)
+        topPipe.physicsBody = SKPhysicsBody(rectangleOf: topPipe.size)
+        topPipe.physicsBody?.isDynamic = false
+        topPipe.physicsBody?.categoryBitMask = pipeCategory
+        
+        let bottomPipe = SKSpriteNode(color: pipeColor, size: CGSize(width: pipeWidth, height: frame.height))
+        bottomPipe.anchorPoint = CGPoint(x: 0.5, y: 1)
+        bottomPipe.position = CGPoint(x: 0, y: -gapHeight/2)
+        bottomPipe.physicsBody = SKPhysicsBody(rectangleOf: bottomPipe.size)
+        bottomPipe.physicsBody?.isDynamic = false
+        bottomPipe.physicsBody?.categoryBitMask = pipeCategory
+        
+        node.addChild(topPipe)
+        node.addChild(bottomPipe)
+        
+        return node
     }
     
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        for t in touches { self.touchUp(atPoint: t.location(in: self)) }
+    func spawnPipe() {
+        let newPipe = createPipe(atX: candidatePipe.position.x, y: candidatePipe.position.y)
+        pipeParent.addChild(newPipe)
     }
     
-    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        for t in touches { self.touchUp(atPoint: t.location(in: self)) }
+    func nearestPipeAhead() -> SKNode? {
+        // Find pipe that is ahead of the bird
+        return pipeParent.children.min(by: { abs($0.position.x - bird.position.x) < abs($1.position.x - bird.position.x) })
     }
     
+    func didBegin(_ contact: SKPhysicsContact) {
+        if gameOver { return }
+        
+        if (contact.bodyA.categoryBitMask == birdCategory && contact.bodyB.categoryBitMask == pipeCategory) ||
+            (contact.bodyB.categoryBitMask == birdCategory && contact.bodyA.categoryBitMask == pipeCategory) {
+            endGame(playerWon: true)
+        }
+    }
     
-    override func update(_ currentTime: TimeInterval) {
-        // Called before each frame is rendered
+    func endGame(playerWon: Bool) {
+        gameOver = true
+        
+        let label = SKLabelNode(text: playerWon ? "You Killed the Bird!" : "The Bird Escaped!")
+        label.fontSize = 40
+        label.fontColor = .red
+        label.position = CGPoint(x: frame.midX, y: frame.midY)
+        addChild(label)
+        
+        bird.removeAllActions()
+        pipeParent.removeAllActions()
+        candidatePipe.removeAllActions()
     }
 }
